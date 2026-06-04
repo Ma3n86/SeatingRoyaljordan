@@ -53,6 +53,10 @@
     <div class="flex items-center gap-2">
       <span id="connStatus" class="text-xs font-bold px-3 py-1.5 rounded-full bg-slate-700 text-slate-200">● Connecting…</span>
       <button id="refreshBtn" class="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg text-sm font-semibold" title="Re-fetch data from Supabase">↻ Refresh</button>
+      <button id="exportBtn" class="bg-green-600 hover:bg-green-500 text-white px-3 py-2 rounded-lg text-sm font-bold shadow-sm flex items-center gap-1.5" title="Download the full attendance report as a UTF-8 CSV (opens in Excel)">
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        Export to Excel
+      </button>
       <button id="resetBtn" class="bg-slate-700 hover:bg-red-700 px-3 py-2 rounded-lg text-sm font-semibold" title="Clear ALL check-ins (everyone)">Reset</button>
     </div>
   </header>
@@ -326,7 +330,28 @@ const escapeHtml = s => (s||"").replace(/[&<>"]/g, m=>({"&":"&amp;","<":"&lt;","
 const getGuest = id => GUESTS_BY_ID.get(String(id));
 const isIn = id => !!CHECKINS[String(id)];
 const isSyncing = id => SYNCING.has(String(id));
-function checkinTime(id){ const e=CHECKINS[String(id)]; return e ? new Date(e.t).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}) : ""; }
+
+/* Read the REAL check-in timestamp from a Supabase row. The column is
+   `checked_in_at`; older schemas used `created_at`. We parse whichever is
+   present and return epoch-ms, or null if neither parses. We deliberately do
+   NOT fall back to Date.now() here — a server row must lock to its stored time. */
+function tsFromRow(r){
+  if(!r) return null;
+  const raw = r.checked_in_at != null ? r.checked_in_at
+            : (r.created_at   != null ? r.created_at : null);
+  if(raw == null) return null;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/* Format an epoch-ms value as HH:MM AM/PM (12-hour, locale-stable). */
+function fmtTime(ms){
+  if(ms == null || Number.isNaN(ms)) return "";
+  return new Date(ms).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", hour12:true });
+}
+
+/* Render the EXACT recorded check-in time for a guest — never the live time. */
+function checkinTime(id){ const e=CHECKINS[String(id)]; return e ? fmtTime(e.t) : ""; }
 
 /* ============================================================
    CONNECTION STATUS + NOTES
@@ -395,7 +420,7 @@ async function bootSupabase(){
     if(cRes.error) throw cRes.error;
     ingestGuests((gRes.data||[]).map((row,i)=>makeGuest(normalizeRow(row,i))));
     CHECKINS={};
-    for(const r of (cRes.data||[])){ CHECKINS[String(r.guest_id)]={ t: r.created_at?Date.parse(r.created_at):Date.now() }; }
+    for(const r of (cRes.data||[])){ CHECKINS[String(r.guest_id)]={ t: tsFromRow(r) }; }
     hideNote();
     finalizeAndRender();
     subscribeRealtime();
@@ -439,7 +464,7 @@ function onRealtime(payload){
   const ev=payload.eventType;
   if(ev==="INSERT" || ev==="UPDATE"){
     const r=payload.new; if(!r) return;
-    CHECKINS[String(r.guest_id)] = { t: r.created_at?Date.parse(r.created_at):Date.now() };
+    CHECKINS[String(r.guest_id)] = { t: tsFromRow(r) };
   } else if(ev==="DELETE"){
     const o=payload.old||{};
     if(o.guest_id!=null){ delete CHECKINS[String(o.guest_id)]; }
@@ -453,7 +478,7 @@ async function refetchCheckins(){
   const { data, error } = await SB.from("checkins").select("*");
   if(error){ console.error(error); return; }
   CHECKINS={};
-  for(const r of data){ CHECKINS[String(r.guest_id)]={ t: r.created_at?Date.parse(r.created_at):Date.now() }; }
+  for(const r of data){ CHECKINS[String(r.guest_id)]={ t: tsFromRow(r) }; }
   refreshStats(); render();
   if(selectedId!=null) showBanner(getGuest(selectedId));
 }
@@ -700,6 +725,55 @@ function buildLegend(){
 }
 
 /* ============================================================
+   ATTENDANCE EXPORT — UTF-8 (BOM) CSV that opens cleanly in Excel
+   ============================================================ */
+/* Quote a single CSV field: always double-quote so embedded commas, quotes,
+   and newlines in Arabic names / orgs / titles can never break the columns. */
+function csvCell(v){
+  const s = (v == null ? "" : String(v));
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+
+function downloadAttendanceReport(){
+  const headers = ["Zone","Assigned Person","Sector","Organization","Title","Name (EN)","Name (AR)","Checked In?","Check-in Time"];
+  const lines = [ headers.map(csvCell).join(",") ];
+
+  for(const g of GUESTS){
+    const entry   = CHECKINS[String(g.id)];     // merge guest state with check-in state
+    const checked = !!entry;
+    const row = [
+      g.zone,
+      g.group ? g.group.label : "",             // "Assigned Person" = the seating group/category they are assigned to
+      g.sector,
+      g.org,
+      g.title,
+      g.nameEn,
+      g.nameAr,
+      checked ? "Yes" : "No",
+      checked ? fmtTime(entry.t) : ""           // exact stored time (HH:MM AM/PM); blank if not checked in
+    ];
+    lines.push(row.map(csvCell).join(","));
+  }
+
+  // CRITICAL: prepend the UTF-8 BOM (﻿) so Excel renders Arabic correctly.
+  const csv  = "﻿" + lines.join("\r\n");
+  const blob = new Blob([csv], { type:"text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+
+  const now = new Date();
+  const pad = n => String(n).padStart(2,"0");
+  const stamp = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `Odeon_Attendance_Report_${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+/* ============================================================
    EVENTS
    ============================================================ */
 resultsEl.addEventListener("click", e=>{
@@ -724,6 +798,7 @@ document.addEventListener("keydown", e=>{
 });
 
 $("#refreshBtn").addEventListener("click", ()=> refreshData());
+$("#exportBtn").addEventListener("click", ()=> downloadAttendanceReport());
 
 $("#resetBtn").addEventListener("click", async ()=>{
   const scope = SB ? "for ALL agents" : "on this device";
