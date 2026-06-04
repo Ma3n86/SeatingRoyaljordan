@@ -232,18 +232,20 @@ function buildGuestsFromCSV(rows){
 
 /* ---------- STRICT Arabic normalization (data + query) ---------- */
 function normalizeArabic(s){
+  if(!s) return "";
   return s
-    .replace(/[ؐ-ًؚ-ٰٟـۖ-ۭ]/g,"")   // strip Tashkeel/diacritics + Tatweel (excludes letters U+0621..U+064A)
-    .replace(/[أإآٱ]/g,"ا")            // Alef variants -> bare Alef
-    .replace(/ة/g,"ه")                  // Taa Marbuta -> Haa
-    .replace(/ى/g,"ي");                 // Alef Maksura -> Yaa
+    .replace(/\p{M}/gu,"")     // strip ALL combining marks (Arabic tashkeel + Latin accents) — pure ASCII, reorder-proof
+    .replace(/ـ/g,"")     // strip Tatweel / Kashida
+    .replace(/[أإآٱ]/g,"ا")    // Alef variants -> bare Alef
+    .replace(/ة/g,"ه")          // Taa Marbuta -> Haa
+    .replace(/ى/g,"ي");         // Alef Maksura -> Yaa
 }
 function norm(s){
   if(!s) return "";
   s=normalizeArabic(s);
   s=s.replace(/ؤ/g,"و").replace(/ئ/g,"ي").replace(/ء/g,"").replace(/ی/g,"ي");
-  s=s.normalize("NFKD").replace(/[̀-ͯٓ-ٕ]/g,"");
-  s=s.toLowerCase().replace(/[._'`’,()\/\\\-]+/g," ").replace(/\s+/g," ").trim();
+  s=s.normalize("NFKD").replace(/\p{M}/gu,"");
+  s=s.toLowerCase().replace(/[._'`’,()\/\\-]+/g," ").replace(/\s+/g," ").trim();
   return s;
 }
 
