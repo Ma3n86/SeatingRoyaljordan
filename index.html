@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Odeon Theatre — Registration Desk</title>
+
+<!-- Styling + fuzzy search (vendored, offline) -->
+<script src="vendor/tailwind.js"></script>
+<script src="vendor/fuse.min.js"></script>
+<!-- Supabase JS client (CDN) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<style>
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arabic, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .rtl { direction: rtl; text-align: right; }
+  .scroll::-webkit-scrollbar { width: 12px; }
+  .scroll::-webkit-scrollbar-thumb { background:#94a3b8; border-radius:8px; border:3px solid transparent; background-clip:content-box; }
+  @keyframes pulseBanner { 0%,100%{ box-shadow:0 0 0 0 rgba(220,38,38,.55);} 50%{ box-shadow:0 0 0 14px rgba(220,38,38,0);} }
+  .zoneA-pulse { animation: pulseBanner 1.6s ease-out infinite; }
+  mark { background:#fde047; color:#111; border-radius:3px; padding:0 1px; }
+  /* SVG seating overlay — invisible until a guest's group is selected */
+  #mapSvg .zone { opacity:0; transition:opacity .45s ease, fill .45s ease; }
+  #mapSvg .zone.active { opacity:0.6; }
+  @keyframes livedot { 0%,100%{opacity:1;} 50%{opacity:.35;} }
+  .livedot { animation: livedot 1.4s ease-in-out infinite; }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-900">
+
+<div class="flex flex-col h-screen">
+
+  <!-- ====== HEADER ====== -->
+  <header class="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 shadow-lg z-20">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-lg bg-amber-400 text-slate-900 font-black text-xl grid place-items-center">Ω</div>
+      <div>
+        <h1 class="text-lg sm:text-xl font-extrabold leading-tight">Odeon Theatre — Registration</h1>
+        <p class="text-xs text-slate-300 leading-tight">Roman Amphitheatre · Guest Check-In Desk</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 sm:gap-5 ml-auto text-center">
+      <div><div id="statTotal" class="text-2xl font-extrabold">0</div><div class="text-[10px] uppercase tracking-wider text-slate-400">Guests</div></div>
+      <div><div id="statIn" class="text-2xl font-extrabold text-green-400">0</div><div class="text-[10px] uppercase tracking-wider text-slate-400">Checked In</div></div>
+      <div><div id="statZoneA" class="text-2xl font-extrabold text-red-400">0</div><div class="text-[10px] uppercase tracking-wider text-slate-400">On Chair</div></div>
+    </div>
+
+    <div class="flex items-center gap-2">
+      <span id="connStatus" class="text-xs font-bold px-3 py-1.5 rounded-full bg-slate-700 text-slate-200">● Connecting…</span>
+      <button id="refreshBtn" class="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg text-sm font-semibold" title="Re-fetch data from Supabase">↻ Refresh</button>
+      <button id="resetBtn" class="bg-slate-700 hover:bg-red-700 px-3 py-2 rounded-lg text-sm font-semibold" title="Clear ALL check-ins (everyone)">Reset</button>
+    </div>
+  </header>
+
+  <!-- ====== SEARCH BAR ====== -->
+  <div class="bg-white border-b border-slate-200 px-4 py-3 shadow-sm z-10">
+    <div class="relative max-w-7xl mx-auto">
+      <svg class="absolute left-4 top-1/2 -translate-y-1/2 w-6 h-6 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="search" type="search" autocomplete="off" autocapitalize="off" spellcheck="false"
+        placeholder="Search any guest — type a name in English or Arabic…  بحث بالاسم"
+        class="w-full text-2xl sm:text-3xl font-semibold pl-14 pr-4 py-4 rounded-xl border-2 border-slate-300 focus:border-amber-500 focus:ring-4 focus:ring-amber-200 outline-none" />
+      <div class="flex items-center gap-3 mt-3">
+        <button id="seatedToggle" aria-pressed="false" type="button"
+          class="flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 border-slate-300 bg-white text-slate-700 font-bold text-base transition shadow-sm">
+          <span id="seatedCheck" class="w-6 h-6 rounded-md border-2 border-slate-400 grid place-items-center text-transparent text-sm font-black">✓</span>
+          <span>View Checked-In Only</span>
+        </button>
+        <span id="seatedHint" class="text-sm text-slate-400"></span>
+      </div>
+      <div id="netNote" class="hidden mt-3 rounded-lg px-3 py-2 text-sm font-semibold"></div>
+    </div>
+  </div>
+
+  <!-- ====== MAIN ====== -->
+  <main class="flex-1 flex flex-col lg:flex-row overflow-hidden">
+
+    <!-- Results -->
+    <section class="lg:w-3/5 flex flex-col overflow-hidden border-r border-slate-200">
+      <div id="resultMeta" class="px-4 py-2 text-sm text-slate-500 bg-slate-50 border-b border-slate-200"></div>
+      <div id="results" class="scroll flex-1 overflow-y-auto p-3 sm:p-4 space-y-3"></div>
+    </section>
+
+    <!-- Side panel: status banner + 2D venue map + legend -->
+    <aside class="lg:w-2/5 flex flex-col overflow-y-auto bg-slate-50">
+      <div id="statusBanner" class="p-4"></div>
+      <div class="px-4">
+        <div id="mapWrap" class="relative w-full rounded-xl overflow-hidden border-2 border-slate-300 bg-slate-800"
+             style="aspect-ratio:1170/796; background-image:url('odeonimage.jpeg'); background-size:contain; background-repeat:no-repeat; background-position:center;">
+          <svg id="mapSvg" viewBox="0 0 1170 796" preserveAspectRatio="xMidYMid meet" class="absolute inset-0 w-full h-full"></svg>
+          <div class="absolute bottom-1 left-1 bg-white/85 text-slate-700 text-[11px] px-2 py-0.5 rounded font-semibold pointer-events-none">Click a guest to light up their area</div>
+        </div>
+      </div>
+      <div id="legend" class="p-4 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs"></div>
+    </aside>
+
+  </main>
+</div>
+
+<!-- Embedded guest data — used ONLY as an offline fallback when Supabase is not configured -->
+<script src="guests.js"></script>
+
+<script>
+"use strict";
+/* ============================================================
+   ODEON THEATRE — Registration Desk (Supabase real-time edition)
+   ------------------------------------------------------------
+   SUPABASE SETUP (run once in the SQL editor):
+
+     create table guests (
+       id        bigint generated always as identity primary key,
+       zone      text, sector text, org text, title text,
+       name_ar   text, name_en text
+     );
+     -- one row per checked-in guest; guest_id is the PRIMARY KEY so that
+     -- realtime DELETE events carry guest_id (Postgres sends only PK columns
+     -- on delete unless REPLICA IDENTITY FULL is set).
+     create table checkins (
+       guest_id   bigint primary key references guests(id) on delete cascade,
+       created_at timestamptz not null default now(),
+       agent      text
+     );
+     alter publication supabase_realtime add table checkins;   -- enable realtime
+
+     -- demo-friendly RLS (tighten for production):
+     alter table guests   enable row level security;
+     alter table checkins enable row level security;
+     create policy "read guests"  on guests   for select using (true);
+     create policy "read checks"  on checkins for select using (true);
+     create policy "add checks"   on checkins for insert with check (true);
+     create policy "del checks"   on checkins for delete using (true);
+
+   Then paste your project URL + anon key into SUPABASE_URL / SUPABASE_KEY below.
+   ============================================================ */
+const SUPABASE_URL = 'https://qeqgjuwtubufyskqwmji.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFlcWdqdXd0dWJ1Znlza3F3bWppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA1NjgyMTAsImV4cCI6MjA5NjE0NDIxMH0.k9emi4l9DNhSEUR3T86UGmFFWvTSrhrwcMGj94OPajw';
+
+const CONFIGURED = SUPABASE_URL !== 'YOUR_URL' && SUPABASE_KEY !== 'YOUR_ANON_KEY'
+                   && /^https?:\/\//.test(SUPABASE_URL);
+
+/* ============================================================
+   GROUP DICTIONARY — keyword-driven categorization + colours
+   (checked in priority order; first keyword hit wins)
+   ============================================================ */
+const GROUPS=[
+  { key:"lifetime",    label:"Lifetime Awardee",     color:"#FF00FF", keywords:["lifetime","awardee"], zoneA:true  },
+  { key:"europa",      label:"Europa Nostra",        color:"#800080", keywords:["europa","nostra"],   zoneA:true  },
+  { key:"diplomat",    label:"Diplomat",             color:"#00FF00", keywords:["diplomat"],          zoneA:false },
+  { key:"officials",   label:"Officials",            color:"#000000", keywords:["official"],          zoneA:false },
+  { key:"jkb",         label:"JKB Guests",           color:"#800000", keywords:["jkb"],               zoneA:false },
+  { key:"shortlisted", label:"Shortlisted & Guests", color:"#008080", keywords:["shortlist"],         zoneA:false },
+  { key:"pnt",         label:"PNT BoD & GA",         color:"#0000FF", keywords:["pnt"],               zoneA:false },
+  { key:"zoneA",       label:"Zone A",               color:"#FFD700", keywords:["zone a"],            zoneA:true  }
+];
+const FREE_GROUP={ key:"free", label:"Free Seating", color:"#E2E8F0", keywords:[], zoneA:false };
+const GROUP_BY_KEY={}; [...GROUPS, FREE_GROUP].forEach(g=>GROUP_BY_KEY[g.key]=g);
+
+function groupForGuest(g){
+  const hay=[g.zone, g.sector, g.org, g.title].join(" ").toLowerCase();
+  for(const grp of GROUPS){ if(grp.keywords.some(k=>hay.includes(k))) return grp; }
+  return FREE_GROUP;
+}
+function isEscort(g, grp){
+  const hay=[g.zone, g.sector, g.org, g.title].join(" ").toLowerCase();
+  return grp.zoneA || hay.includes("zone a");
+}
+function textOn(hex){
+  const c=hex.replace("#",""); const r=parseInt(c.substr(0,2),16), g=parseInt(c.substr(2,2),16), b=parseInt(c.substr(4,2),16);
+  return (0.299*r + 0.587*g + 0.114*b)/255 > 0.55 ? "#111827" : "#ffffff";
+}
+
+/* ---------- Build a normalized guest object from raw fields ---------- */
+function makeGuest(f){
+  const zone=(f.zone||"").trim(), sector=(f.sector||"").trim(), org=(f.org||"").trim(),
+        title=(f.title||"").trim(), nameAr=(f.nameAr||"").trim(), nameEn=(f.nameEn||"").trim();
+  const orgIsName = !nameEn && !nameAr;
+  const primary = nameEn || nameAr || org || "(no name)";
+  const g={ id:f.id, zone, sector, org, title, nameAr, nameEn, primary,
+    arLine:(nameAr && nameAr!==primary)?nameAr:"",
+    orgLabel: orgIsName ? "" : org };
+  g.group  = groupForGuest(g);
+  g.escort = isEscort(g, g.group);
+  return g;
+}
+
+/* Map a Supabase row (whatever the column spelling) to raw guest fields. */
+function pick(row, keys){ for(const k of keys){ const v=row[k]; if(v!=null && String(v).trim()!=="") return String(v); } return ""; }
+function normalizeRow(row, idx){
+  return {
+    id:    (row.id!=null ? row.id : (row.guest_id!=null ? row.guest_id : idx)),
+    zone:  pick(row,["zone","Zone"]),
+    sector:pick(row,["sector","Sector"]),
+    org:   pick(row,["org","organization","organisation","الجهة"]),
+    title: pick(row,["title","job_title","المسمى الوظيفي"]),
+    nameAr:pick(row,["name_ar","nameAr","name_arabic","Name (AR)"]),
+    nameEn:pick(row,["name_en","nameEn","name_english","Name (EN)"])
+  };
+}
+
+/* ---------- Offline CSV parsing (fallback only) ---------- */
+function parseCSV(text){
+  const rows=[]; let row=[]; let field=""; let i=0; let inQ=false;
+  const pushF=()=>{ row.push(field); field=""; };
+  const pushR=()=>{ rows.push(row); row=[]; };
+  while(i<text.length){
+    const c=text[i];
+    if(inQ){ if(c==='"'){ if(text[i+1]==='"'){ field+='"'; i+=2; continue; } inQ=false; i++; continue; } field+=c; i++; continue; }
+    if(c==='"'){ inQ=true; i++; continue; }
+    if(c===','){ pushF(); i++; continue; }
+    if(c==='\r'){ i++; continue; }
+    if(c==='\n'){ pushF(); pushR(); i++; continue; }
+    field+=c; i++;
+  }
+  if(field.length>0 || row.length>0){ pushF(); pushR(); }
+  return rows;
+}
+function buildGuestsFromCSV(rows){
+  let start=0;
+  if(rows.length && /name\s*\(en\)/i.test(rows[0].join(","))) start=1;
+  const out=[];
+  for(let r=start;r<rows.length;r++){
+    const c=rows[r];
+    if(!(c[1]||"").trim()) continue;   // need a Sector; skips blank separators + summary rows
+    out.push(makeGuest({ id:r, zone:c[0], sector:c[1], org:c[2], title:c[3], nameAr:c[4], nameEn:c[5] }));
+  }
+  return out;
+}
+
+/* ---------- STRICT Arabic normalization (data + query) ---------- */
+function normalizeArabic(s){
+  return s
+    .replace(/[ؐ-ًؚ-ٰٟـۖ-ۭ]/g,"")   // strip Tashkeel/diacritics + Tatweel (excludes letters U+0621..U+064A)
+    .replace(/[أإآٱ]/g,"ا")            // Alef variants -> bare Alef
+    .replace(/ة/g,"ه")                  // Taa Marbuta -> Haa
+    .replace(/ى/g,"ي");                 // Alef Maksura -> Yaa
+}
+function norm(s){
+  if(!s) return "";
+  s=normalizeArabic(s);
+  s=s.replace(/ؤ/g,"و").replace(/ئ/g,"ي").replace(/ء/g,"").replace(/ی/g,"ي");
+  s=s.normalize("NFKD").replace(/[̀-ͯٓ-ٕ]/g,"");
+  s=s.toLowerCase().replace(/[._'`’,()\/\\\-]+/g," ").replace(/\s+/g," ").trim();
+  return s;
+}
+
+/* ---------- Cross-language phonetic transliteration ---------- */
+function toArabic(t){
+  t=(t||"").toLowerCase();
+  var di=[["sh","ش"],["ch","تش"],["th","ث"],["kh","خ"],["gh","غ"],["dh","ذ"],["ph","ف"],["ck","ك"],["ou","و"],["oo","و"],["ee","ي"],["aa","ا"]];
+  for(var k=0;k<di.length;k++) t=t.split(di[k][0]).join(di[k][1]);
+  var map={"a":"ا","b":"ب","c":"ك","d":"د","e":"ي","f":"ف","g":"ج","h":"ه","i":"ي","j":"ج","k":"ك","l":"ل","m":"م","n":"ن","o":"و","p":"ب","q":"ق","r":"ر","s":"س","t":"ت","u":"و","v":"ف","w":"و","x":"كس","y":"ي","z":"ز"};
+  var out="";
+  for(var ci=0;ci<t.length;ci++){ var ch=t[ci];
+    if(map[ch]!==undefined) out+=map[ch];
+    else if(ch>="؀"&&ch<="ۿ") out+=ch;
+    else if(ch===" ") out+=" ";
+  }
+  return out;
+}
+function toLatin(t){
+  t=(t||"");
+  var map={"ا":"a","أ":"a","إ":"a","آ":"a","ٱ":"a","ب":"b","ت":"t","ث":"th","ج":"j","ح":"h","خ":"kh","د":"d","ذ":"th","ر":"r","ز":"z","س":"s","ش":"sh","ص":"s","ض":"d","ط":"t","ظ":"z","ع":"a","غ":"gh","ف":"f","ق":"q","ك":"k","ل":"l","م":"m","ن":"n","ه":"h","ة":"a","و":"w","ؤ":"w","ي":"y","ى":"a","ئ":"y","ء":""};
+  var out="";
+  for(var ci=0;ci<t.length;ci++){ var ch=t[ci];
+    if(map[ch]!==undefined) out+=map[ch];
+    else if(/[a-z0-9]/i.test(ch)) out+=ch.toLowerCase();
+    else if(ch===" ") out+=" ";
+  }
+  return out;
+}
+function generatePhonetics(text){ return { phonAr: toArabic(text), phonLat: toLatin(text) }; }
+
+/* ---------- Fuse.js fuzzy search ---------- */
+let fuse=null;
+function buildFuse(){
+  fuse = new Fuse(GUESTS, {
+    includeScore:true, ignoreLocation:true, threshold:0.30, minMatchCharLength:2, distance:100,
+    keys:[ {name:"_primary",weight:1.0}, {name:"_en",weight:0.8}, {name:"_ar",weight:0.8}, {name:"_meta",weight:0.4} ]
+  });
+}
+function searchGuests(rawQuery){
+  const q=norm(rawQuery);
+  const tokens=q.split(/\s+/).filter(t=>t.length>=2);
+  if(!tokens.length){
+    if(!q) return [];
+    return GUESTS.filter(g=>g._primary.includes(q)||g._ar.includes(q)||g._en.includes(q)||g._meta.includes(q)).map(g=>({g,score:0}));
+  }
+  let acc=null;
+  for(const tok of tokens){
+    const m=new Map();
+    for(const r of fuse.search(tok)) m.set(String(r.item.id), r.score==null?0.5:r.score);
+    if(acc===null){ acc=m; }
+    else { const nx=new Map(); for(const [id,sc] of acc) if(m.has(id)) nx.set(id, sc+m.get(id)); acc=nx; }
+    if(acc.size===0) break;
+  }
+  const out=[];
+  for(const [id,sc] of acc){ const g=GUESTS_BY_ID.get(id); if(g) out.push({g,score:sc}); }
+  out.sort((a,b)=> a.score-b.score || a.g.primary.localeCompare(b.g.primary));
+  return out;
+}
+
+/* ============================================================
+   STATE
+   ============================================================ */
+let GUESTS=[];
+let GUESTS_BY_ID=new Map();          // String(id) -> guest
+let CHECKINS={};                     // String(id) -> { t:ms }
+let SYNCING=new Set();               // String(id) currently awaiting a network write
+let selectedId=null;                 // String(id) or null
+let showCheckedInOnly=false;
+const LIMIT=120;
+
+let SB=null;                         // Supabase client (null in offline mode)
+let OFFLINE=false;
+let REALTIME_CH=null;
+
+const $ = sel => document.querySelector(sel);
+const resultsEl=$("#results"), metaEl=$("#resultMeta");
+const escapeHtml = s => (s||"").replace(/[&<>"]/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
+const getGuest = id => GUESTS_BY_ID.get(String(id));
+const isIn = id => !!CHECKINS[String(id)];
+const isSyncing = id => SYNCING.has(String(id));
+function checkinTime(id){ const e=CHECKINS[String(id)]; return e ? new Date(e.t).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}) : ""; }
+
+/* ============================================================
+   CONNECTION STATUS + NOTES
+   ============================================================ */
+function setConn(state){
+  const el=$("#connStatus");
+  const styles={
+    connecting:["● Connecting…","bg-amber-500 text-slate-900"],
+    live:      ["● Live sync","bg-green-600 text-white livedot"],
+    offline:   ["● Offline (local)","bg-slate-600 text-slate-200"],
+    error:     ["● Connection error","bg-red-600 text-white"]
+  };
+  const [txt,cls]=styles[state]||styles.connecting;
+  el.className="text-xs font-bold px-3 py-1.5 rounded-full "+cls;
+  el.textContent=txt;
+}
+function showNote(msg, kind){
+  const el=$("#netNote");
+  const palette={ error:"bg-red-100 text-red-800 border border-red-300",
+                  warn:"bg-amber-100 text-amber-900 border border-amber-300",
+                  info:"bg-blue-100 text-blue-900 border border-blue-300" };
+  el.className="mt-3 rounded-lg px-3 py-2 text-sm font-semibold "+(palette[kind]||palette.info);
+  el.textContent=msg;
+}
+function hideNote(){ $("#netNote").className="hidden"; }
+
+/* ============================================================
+   DATA INGEST  (shared by Supabase + offline paths)
+   ============================================================ */
+function ingestGuests(arr){
+  GUESTS=arr; GUESTS_BY_ID=new Map();
+  for(const g of GUESTS){
+    const combined=[g.nameAr,g.nameEn,g.org].filter(Boolean).join(" ");
+    const ph=generatePhonetics(combined);             // cross-language phonetics
+    g._primary = norm(g.primary);
+    g._en = norm(g.nameEn + " " + ph.phonLat);
+    g._ar = norm(g.nameAr + " " + ph.phonAr);
+    g._meta = norm([g.org,g.title,g.sector].join(" "));
+    GUESTS_BY_ID.set(String(g.id), g);
+  }
+  buildFuse();
+}
+function finalizeAndRender(){
+  selectedId=null; clearMap(); $("#statusBanner").innerHTML="";
+  render(); refreshStats();
+}
+
+/* ============================================================
+   BOOT — Supabase path or offline fallback
+   ============================================================ */
+function initSupabase(){
+  if(!CONFIGURED) return false;
+  if(typeof supabase==="undefined" || !supabase.createClient){ return false; }
+  try{ SB=supabase.createClient(SUPABASE_URL, SUPABASE_KEY); return true; }
+  catch(e){ console.error(e); return false; }
+}
+
+async function bootSupabase(){
+  setConn("connecting"); showLoading("Connecting to database…");
+  try{
+    const [gRes,cRes]=await Promise.all([
+      SB.from("guests").select("*"),
+      SB.from("checkins").select("*")
+    ]);
+    if(gRes.error) throw gRes.error;
+    if(cRes.error) throw cRes.error;
+    ingestGuests((gRes.data||[]).map((row,i)=>makeGuest(normalizeRow(row,i))));
+    CHECKINS={};
+    for(const r of (cRes.data||[])){ CHECKINS[String(r.guest_id)]={ t: r.created_at?Date.parse(r.created_at):Date.now() }; }
+    hideNote();
+    finalizeAndRender();
+    subscribeRealtime();
+  }catch(e){
+    console.error("Supabase load failed:", e);
+    bootOffline("Could not reach Supabase ("+(e.message||e)+"). Showing local data — check-ins are NOT syncing.", "error");
+  }
+}
+
+function bootOffline(noteMsg, connState){
+  SB=null; OFFLINE=true;
+  setConn(connState||"offline");
+  if(noteMsg) showNote(noteMsg, connState==="error"?"error":"warn");
+  else if(!CONFIGURED) showNote("Supabase not configured — running in LOCAL preview mode. Set SUPABASE_URL and SUPABASE_KEY at the top of the <script> to enable real-time multi-agent sync.", "warn");
+  if(window.RSVP_CSV){ ingestGuests(buildGuestsFromCSV(parseCSV(window.RSVP_CSV))); }
+  else { ingestGuests([]); }
+  CHECKINS=loadLocal();
+  finalizeAndRender();
+}
+
+async function refreshData(){
+  if(SB){ await bootSupabase(); }
+  else { bootOffline(); }
+}
+
+/* ============================================================
+   REALTIME SUBSCRIPTION (checkins table)
+   ============================================================ */
+function subscribeRealtime(){
+  if(!SB) return;
+  if(REALTIME_CH){ SB.removeChannel(REALTIME_CH); REALTIME_CH=null; }
+  REALTIME_CH = SB.channel("odeon-checkins")
+    .on("postgres_changes", { event:"*", schema:"public", table:"checkins" }, onRealtime)
+    .subscribe((status)=>{
+      if(status==="SUBSCRIBED") setConn("live");
+      else if(status==="CHANNEL_ERROR" || status==="TIMED_OUT") setConn("error");
+      else setConn("connecting");
+    });
+}
+function onRealtime(payload){
+  const ev=payload.eventType;
+  if(ev==="INSERT" || ev==="UPDATE"){
+    const r=payload.new; if(!r) return;
+    CHECKINS[String(r.guest_id)] = { t: r.created_at?Date.parse(r.created_at):Date.now() };
+  } else if(ev==="DELETE"){
+    const o=payload.old||{};
+    if(o.guest_id!=null){ delete CHECKINS[String(o.guest_id)]; }
+    else { refetchCheckins(); return; }   // payload lacked guest_id — resync from server
+  }
+  refreshStats(); render();
+  if(selectedId!=null) showBanner(getGuest(selectedId));
+}
+async function refetchCheckins(){
+  if(!SB) return;
+  const { data, error } = await SB.from("checkins").select("*");
+  if(error){ console.error(error); return; }
+  CHECKINS={};
+  for(const r of data){ CHECKINS[String(r.guest_id)]={ t: r.created_at?Date.parse(r.created_at):Date.now() }; }
+  refreshStats(); render();
+  if(selectedId!=null) showBanner(getGuest(selectedId));
+}
+
+/* ============================================================
+   CHECK-IN — Supabase write (with optimistic UI) OR local
+   ============================================================ */
+function loadLocal(){ try{ return JSON.parse(localStorage.getItem("odeon_checkins_v1")||"{}"); }catch(e){ return {}; } }
+function saveLocal(){ localStorage.setItem("odeon_checkins_v1", JSON.stringify(CHECKINS)); }
+
+async function toggleCheckin(id){
+  id=String(id);
+  const g=getGuest(id); if(!g) return;
+  if(isSyncing(id)) return;                         // guard against double-clicks
+  const was=isIn(id);
+
+  setSyncing(id, true);
+  if(was) delete CHECKINS[id]; else CHECKINS[id]={ t: Date.now() };   // optimistic
+  refreshStats(); render(); rebanner(id);
+
+  try{
+    if(SB){
+      if(was){
+        const { error } = await SB.from("checkins").delete().eq("guest_id", g.id);
+        if(error) throw error;
+      } else {
+        const { error } = await SB.from("checkins").upsert({ guest_id: g.id }, { onConflict:"guest_id" });
+        if(error) throw error;
+      }
+    } else {
+      saveLocal();
+    }
+    hideNote();
+  }catch(e){
+    console.error("check-in sync failed:", e);
+    if(was) CHECKINS[id]={ t: Date.now() }; else delete CHECKINS[id];  // revert
+    showNote("Check-in did not sync ("+(e.message||e)+"). Reverted — please retry.", "error");
+  }finally{
+    setSyncing(id, false);
+    refreshStats(); render(); rebanner(id);
+  }
+}
+function setSyncing(id, on){ if(on) SYNCING.add(String(id)); else SYNCING.delete(String(id)); }
+function rebanner(id){ if(selectedId!=null && String(selectedId)===String(id)) showBanner(getGuest(id)); }
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+function showLoading(msg){
+  metaEl.textContent = msg||"Loading…";
+  resultsEl.innerHTML = `
+  <div class="flex flex-col items-center justify-center py-24 text-slate-500">
+    <svg class="animate-spin w-12 h-12 mb-4 text-amber-500" viewBox="0 0 24 24" fill="none">
+      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+      <path class="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+    </svg>
+    <div class="text-lg font-semibold">${escapeHtml(msg||"Loading data…")}</div>
+  </div>`;
+}
+
+function highlight(text, tokens){
+  let out=escapeHtml(text);
+  if(!tokens.length) return out;
+  for(const t of tokens){
+    if(t.length<2) continue;
+    try{ const re=new RegExp("("+t.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","gi"); out=out.replace(re,"<mark>$1</mark>"); }catch(e){}
+  }
+  return out;
+}
+
+let currentTokens=[];
+function render(){
+  const q=$("#search").value.trim();
+  currentTokens = q.split(/\s+/).filter(Boolean);
+
+  if(showCheckedInOnly){
+    let base = GUESTS.filter(g=>isIn(g.id));
+    if(q){ const ids=new Set(searchGuests(q).map(r=>String(r.g.id))); base = base.filter(g=>ids.has(String(g.id))); }
+    base.sort((a,b)=> (CHECKINS[String(b.id)]?CHECKINS[String(b.id)].t:0)-(CHECKINS[String(a.id)]?CHECKINS[String(a.id)].t:0));
+    metaEl.textContent = base.length+" checked in"+(q?(' matching "'+q+'"'):"")+(base.length>LIMIT?" · showing first "+LIMIT:"");
+    resultsEl.innerHTML = base.length===0
+      ? '<div class="text-center text-slate-400 py-16 text-lg">'+(q?'No checked-in guest matches that search.':'No one is checked in yet. Toggle off to search all guests.')+'</div>'
+      : base.slice(0,LIMIT).map(g=>cardHTML(g)).join("");
+    return;
+  }
+
+  if(!q){
+    metaEl.textContent = GUESTS.length+" guests loaded · start typing to search";
+    resultsEl.innerHTML = welcomeHTML();
+    return;
+  }
+
+  const results = searchGuests(q);
+  metaEl.textContent = results.length===0
+    ? "No matches for \""+q+"\""
+    : results.length+" match"+(results.length>1?"es":"")+(results.length>LIMIT?" · showing first "+LIMIT:"");
+  resultsEl.innerHTML = results.length===0
+    ? '<div class="text-center text-slate-400 py-16 text-lg">No guest found. Check spelling or try part of the name / organisation.</div>'
+    : results.slice(0,LIMIT).map(r=>cardHTML(r.g)).join("");
+}
+
+function welcomeHTML(){
+  return `
+  <div class="text-center text-slate-400 py-12">
+    <div class="text-6xl mb-4">⌨️</div>
+    <p class="text-xl font-semibold text-slate-500">Type a guest's name to begin</p>
+    <p class="text-sm mt-2">Searches English &amp; Arabic names, organisations and titles simultaneously.</p>
+    <p class="text-xs mt-6 text-slate-400">Tip: press <kbd class="px-1.5 py-0.5 bg-slate-200 rounded">/</kbd> to focus search · <kbd class="px-1.5 py-0.5 bg-slate-200 rounded">Enter</kbd> to open the top result · <kbd class="px-1.5 py-0.5 bg-slate-200 rounded">Esc</kbd> to clear</p>
+  </div>`;
+}
+
+function statusChip(g){
+  const c=g.group.color, t=textOn(c);
+  return `<span class="shrink-0 px-3 py-1 rounded-full text-sm font-extrabold tracking-wide whitespace-nowrap" style="background:${c};color:${t}">${escapeHtml(g.group.label)}</span>`;
+}
+
+/* check-in button with Syncing / Checked-in / Check-in states */
+function checkBtnHTML(g, big){
+  const id=String(g.id), syncing=isSyncing(id), inn=isIn(id);
+  const base = big ? "mt-3 w-full py-2.5 rounded-lg text-base font-extrabold"
+                   : "px-3 py-1.5 rounded-lg text-sm font-bold whitespace-nowrap";
+  if(syncing){
+    return `<button disabled class="checkin-btn ${base} bg-slate-300 text-slate-600 cursor-wait opacity-80">⏳ Syncing…</button>`;
+  }
+  if(inn){
+    return big
+      ? `<button data-checkin="${id}" class="checkin-btn ${base} bg-white text-green-700">✓ CHECKED IN · ${checkinTime(id)}</button>`
+      : `<button data-checkin="${id}" class="checkin-btn ${base} bg-green-600 text-white">✓ Checked in · ${checkinTime(id)}</button>`;
+  }
+  return big
+    ? `<button data-checkin="${id}" class="checkin-btn ${base} bg-black/20 hover:bg-black/30 text-white">TAP TO CHECK IN</button>`
+    : `<button data-checkin="${id}" class="checkin-btn ${base} bg-slate-200 hover:bg-green-600 hover:text-white text-slate-700">Check in</button>`;
+}
+
+function cardHTML(g){
+  const id=String(g.id), inn=isIn(id);
+  const meta=[g.sector, g.orgLabel, g.title].filter(Boolean).map(escapeHtml).join(' <span class="text-slate-300">·</span> ');
+  const sel = id===selectedId ? "ring-2 ring-amber-500" : "border-slate-200";
+  const escortBar = g.escort
+    ? `<div class="mt-3 bg-red-600 text-white rounded-lg px-3 py-1.5 text-sm font-black text-center tracking-wide">⚠ CARD ON CHAIR — HAND THEM ESCORT CARD</div>` : "";
+  return `
+  <div data-id="${id}" class="guest-card cursor-pointer bg-white border ${sel} rounded-xl p-4 shadow-sm hover:shadow-md transition ${inn?'opacity-60':''}">
+    <div class="flex items-start gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="text-xl font-bold text-slate-900 leading-snug">${highlight(g.primary,currentTokens)}</div>
+        ${g.arLine?`<div class="rtl text-lg text-slate-700 leading-snug">${highlight(g.arLine,currentTokens)}</div>`:""}
+        ${meta?`<div class="text-sm text-slate-500 mt-1">${meta}</div>`:""}
+      </div>
+      <div class="flex flex-col items-end gap-2">
+        ${statusChip(g)}
+        ${checkBtnHTML(g,false)}
+      </div>
+    </div>
+    ${escortBar}
+  </div>`;
+}
+
+/* ---------- selection + status banner + map highlight ---------- */
+function selectGuest(id){
+  id=String(id);
+  selectedId=id;
+  const g=getGuest(id);
+  render();
+  showBanner(g);
+  if(g) setActiveGroup(g.group.key);
+}
+function showBanner(g){
+  const el=$("#statusBanner");
+  if(!g){ el.innerHTML=""; return; }
+  const grp=g.group, t=textOn(grp.color);
+  const nameBlock = `<div class="text-2xl font-extrabold leading-tight">${escapeHtml(g.primary)}</div>${g.arLine?`<div class="rtl text-xl">${escapeHtml(g.arLine)}</div>`:""}`;
+  const seatPill = `<span class="inline-block mt-2 px-3 py-1 rounded-full text-sm font-extrabold" style="background:${grp.color};color:${t}">${escapeHtml(grp.label)}</span>`;
+  const btn = checkBtnHTML(g, true);
+
+  if(g.escort){
+    el.innerHTML = `
+    <div class="zoneA-pulse rounded-xl bg-red-600 text-white p-4 shadow-lg">
+      <div class="text-3xl font-black tracking-wide">⚠ CARD ON CHAIR</div>
+      ${nameBlock}
+      <div class="mt-2 bg-white text-red-700 rounded-lg px-3 py-2 text-lg font-black text-center">HAND THEM AN ESCORT CARD</div>
+      <div class="mt-2 text-sm font-semibold">Seated in ${seatPill} — highlighted on the map.</div>
+      ${btn}
+    </div>`;
+  } else if(grp.key==="free"){
+    el.innerHTML = `
+    <div class="rounded-xl bg-blue-600 text-white p-4 shadow-lg">
+      <div class="text-3xl font-black tracking-wide">FREE SEATING</div>
+      ${nameBlock}
+      <div class="mt-2 text-lg font-bold">Direct guest to the unassigned White Areas.</div>
+      ${btn}
+    </div>`;
+  } else {
+    el.innerHTML = `
+    <div class="rounded-xl bg-slate-900 text-white p-4 shadow-lg">
+      <div class="text-2xl font-black tracking-wide">${escapeHtml(grp.label)}</div>
+      ${nameBlock}
+      ${seatPill}
+      <div class="mt-2 text-base font-bold">Direct guest to the highlighted area on the map.</div>
+      ${btn}
+    </div>`;
+  }
+}
+
+/* ---------- stats ---------- */
+function refreshStats(){
+  $("#statTotal").textContent=GUESTS.length;
+  let inCount=0, esc=0;
+  for(const g of GUESTS){ if(isIn(g.id)) inCount++; if(g.escort) esc++; }
+  $("#statIn").textContent=inCount;
+  $("#statZoneA").textContent=esc;
+  updateSeatedToggleUI();
+}
+
+/* ============================================================
+   2D VENUE MAP — SVG polygons over odeonimage.jpeg (native 1170×796)
+   ============================================================ */
+const POLYS=[
+  { g:"diplomat",    p:"335,380 410,200 590,160 595,360" },
+  { g:"diplomat",    p:"580,360 585,160 765,200 850,380" },
+  { g:"pnt",         p:"430,445 450,380 565,362 562,438" },
+  { g:"pnt",         p:"648,438 652,362 770,380 778,448" },
+  { g:"zoneA",       p:"462,412 712,412 720,508 452,508" },
+  { g:"officials",   p:"286,420 392,406 426,560 320,576" },
+  { g:"jkb",         p:"786,440 894,422 860,562 760,548" },
+  { g:"shortlisted", p:"150,602 272,598 272,732 150,732" },
+  { g:"europa",      p:"352,628 478,622 486,706 356,710" },
+  { g:"lifetime",    p:"694,622 820,628 818,710 690,706" },
+  { g:"free",        p:"300,46 872,46 872,166 300,166" },
+  { g:"free",        p:"240,378 360,378 360,478 240,478" },
+  { g:"free",        p:"905,378 1016,378 1016,478 905,478" }
+];
+function buildMap(){
+  $("#mapSvg").innerHTML = POLYS.map(o=>{
+    const c=GROUP_BY_KEY[o.g].color;
+    return `<polygon class="zone" data-group="${o.g}" points="${o.p}" style="fill:${c};stroke:${c};stroke-width:4"></polygon>`;
+  }).join("");
+}
+function setActiveGroup(key){ document.querySelectorAll("#mapSvg .zone").forEach(el=>el.classList.toggle("active", el.getAttribute("data-group")===key)); }
+function clearMap(){ document.querySelectorAll("#mapSvg .zone").forEach(el=>el.classList.remove("active")); }
+function buildLegend(){
+  $("#legend").innerHTML=[...GROUPS, FREE_GROUP].map(g=>
+    `<div class="flex items-center gap-2"><span class="w-3.5 h-3.5 rounded-sm border border-slate-400" style="background:${g.color}"></span><span class="text-slate-700">${escapeHtml(g.label)}</span></div>`
+  ).join("");
+}
+
+/* ============================================================
+   EVENTS
+   ============================================================ */
+resultsEl.addEventListener("click", e=>{
+  const btn=e.target.closest("[data-checkin]");
+  if(btn){ e.stopPropagation(); toggleCheckin(btn.dataset.checkin); return; }
+  const card=e.target.closest(".guest-card");
+  if(card){ selectGuest(card.dataset.id); }
+});
+$("#statusBanner").addEventListener("click", e=>{
+  const btn=e.target.closest("[data-checkin]");
+  if(btn){ toggleCheckin(btn.dataset.checkin); }
+});
+
+const searchEl=$("#search");
+searchEl.addEventListener("input", render);
+searchEl.addEventListener("keydown", e=>{
+  if(e.key==="Enter"){ const first=resultsEl.querySelector(".guest-card"); if(first) selectGuest(first.dataset.id); }
+  else if(e.key==="Escape"){ searchEl.value=""; render(); }
+});
+document.addEventListener("keydown", e=>{
+  if(e.key==="/" && document.activeElement!==searchEl){ e.preventDefault(); searchEl.focus(); searchEl.select(); }
+});
+
+$("#refreshBtn").addEventListener("click", ()=> refreshData());
+
+$("#resetBtn").addEventListener("click", async ()=>{
+  const scope = SB ? "for ALL agents" : "on this device";
+  if(!confirm("Clear ALL check-ins "+scope+"? This cannot be undone.")) return;
+  if(SB){
+    try{
+      const { error } = await SB.from("checkins").delete().not("guest_id","is",null);
+      if(error) throw error;
+      CHECKINS={};
+    }catch(e){ showNote("Could not clear check-ins ("+(e.message||e)+").","error"); return; }
+  } else {
+    CHECKINS={}; saveLocal();
+  }
+  refreshStats(); render(); if(selectedId!=null) showBanner(getGuest(selectedId));
+});
+
+/* "View Checked-In Only" toggle */
+function updateSeatedToggleUI(){
+  const btn=$("#seatedToggle"), chk=$("#seatedCheck"), hint=$("#seatedHint");
+  if(!btn) return;
+  btn.setAttribute("aria-pressed", showCheckedInOnly?"true":"false");
+  if(showCheckedInOnly){
+    btn.className="flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 border-green-600 bg-green-600 text-white font-bold text-base transition shadow-sm";
+    chk.className="w-6 h-6 rounded-md border-2 border-white bg-white text-green-600 grid place-items-center text-sm font-black";
+    let n=0; for(const g of GUESTS) if(isIn(g.id)) n++;
+    hint.textContent=n+" guest"+(n===1?"":"s")+" currently inside";
+  } else {
+    btn.className="flex items-center gap-2 px-4 py-2.5 rounded-xl border-2 border-slate-300 bg-white text-slate-700 font-bold text-base transition shadow-sm";
+    chk.className="w-6 h-6 rounded-md border-2 border-slate-400 grid place-items-center text-transparent text-sm font-black";
+    hint.textContent="";
+  }
+}
+$("#seatedToggle").addEventListener("click", ()=>{ showCheckedInOnly=!showCheckedInOnly; updateSeatedToggleUI(); render(); });
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+buildMap();
+buildLegend();
+if(initSupabase()){ bootSupabase(); }
+else { bootOffline(); }
+searchEl.focus();
+</script>
+</body>
+</html>

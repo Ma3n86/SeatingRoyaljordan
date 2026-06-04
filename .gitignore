@@ -1,0 +1,9 @@
+# local agent / tooling
+.claude/
+
+# source data & large/unused assets (not needed by the deployed app)
+*.xlsx
+*.pdf
+FINALRSVP.csv
+LASTLIST.csv
+vendor/three.min.js
